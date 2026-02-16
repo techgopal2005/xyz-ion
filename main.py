@@ -1,9 +1,9 @@
 import os
 import asyncio
 import yt_dlp
-import subprocess
-import json
 import time
+import math
+import requests
 
 from telethon import TelegramClient, events, types
 
@@ -13,62 +13,29 @@ api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_PATH = "/tmp"
+THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
 
 client = TelegramClient("bot", api_id, api_hash).start(bot_token=bot_token)
 
-# ================= METADATA =================
-def get_video_metadata(video_path):
-    try:
-        cmd = [
-            "ffprobe",
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-show_entries", "format=duration",
-            "-of", "json",
-            video_path
-        ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+# ================= HELPER =================
+def format_duration(seconds):
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
 
-        if result.returncode != 0:
-            return 0, 1280, 720
-
-        info = json.loads(result.stdout)
-
-        duration = int(float(info["format"]["duration"]))
-
-        width = info["streams"][0]["width"]
-        height = info["streams"][0]["height"]
-
-        return duration, width, height
-
-    except Exception as e:
-        print("Metadata Error:", e)
-        return 0, 1280, 720
+    if h > 0:
+        return f"{h:02}:{m:02}:{s:02}"
+    return f"{m:02}:{s:02}"
 
 
-def generate_thumbnail(video_path):
-    thumb_path = video_path.replace(".mp4", ".jpg")
-
-    try:
-        # FIRST FRAME THUMBNAIL
-        subprocess.run([
-            "ffmpeg",
-            "-y",
-            "-i", video_path,
-            "-vf", "thumbnail",
-            "-frames:v", "1",
-            thumb_path
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        if os.path.exists(thumb_path):
-            return thumb_path
-        return None
-
-    except Exception as e:
-        print("Thumbnail Error:", e)
-        return None
+def download_thumbnail():
+    thumb_path = os.path.join(DOWNLOAD_PATH, "thumb.jpg")
+    r = requests.get(THUMB_URL)
+    with open(thumb_path, "wb") as f:
+        f.write(r.content)
+    return thumb_path
 
 
 # ================= DOWNLOAD =================
@@ -89,20 +56,20 @@ async def download_video(url, quality):
         "retries": 10,
         "fragment_retries": 10,
         "concurrent_fragment_downloads": 15,
-        "postprocessors": [{
-            "key": "FFmpegVideoRemuxer",
-            "preferedformat": "mp4",
-        }],
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        file_path = ydl.prepare_filename(info)
 
+        file_path = ydl.prepare_filename(info)
         if not file_path.endswith(".mp4"):
             file_path = file_path.rsplit(".", 1)[0] + ".mp4"
 
-        return file_path
+        duration = info.get("duration", 0)
+        width = info.get("width", 1280)
+        height = info.get("height", 720)
+
+        return file_path, duration, width, height
 
 
 # ================= BOT =================
@@ -132,10 +99,10 @@ async def quality_handler(event):
     status_msg = await event.reply("⬇ Downloading...")
 
     try:
-        file_path = await download_video(url, quality)
+        file_path, duration, width, height = await download_video(url, quality)
 
-        duration, width, height = get_video_metadata(file_path)
-        thumbnail = generate_thumbnail(file_path)
+        formatted_duration = format_duration(duration)
+        thumbnail = download_thumbnail()
 
         await status_msg.edit("📤 Uploading...")
 
@@ -158,12 +125,12 @@ async def quality_handler(event):
         await client.send_file(
             event.chat_id,
             file_path,
-            caption=f"✅ Upload Complete!\n\n⏱ Duration: {duration} sec",
+            caption=f"✅ Upload Complete!\n\n⏱ Duration: {formatted_duration}",
             thumb=thumbnail,
             supports_streaming=True,
             attributes=[
                 types.DocumentAttributeVideo(
-                    duration=duration,
+                    duration=int(duration),
                     w=width,
                     h=height,
                     supports_streaming=True
@@ -177,8 +144,7 @@ async def quality_handler(event):
         # cleanup
         if os.path.exists(file_path):
             os.remove(file_path)
-
-        if thumbnail and os.path.exists(thumbnail):
+        if os.path.exists(thumbnail):
             os.remove(thumbnail)
 
         del user_links[event.sender_id]

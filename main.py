@@ -22,8 +22,9 @@ def get_video_metadata(video_path):
         cmd = [
             "ffprobe",
             "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
             "-show_entries", "format=duration",
-            "-show_streams",
             "-of", "json",
             video_path
         ]
@@ -37,13 +38,8 @@ def get_video_metadata(video_path):
 
         duration = int(float(info["format"]["duration"]))
 
-        video_stream = next(
-            (s for s in info["streams"] if s["codec_type"] == "video"),
-            None
-        )
-
-        width = video_stream["width"]
-        height = video_stream["height"]
+        width = info["streams"][0]["width"]
+        height = info["streams"][0]["height"]
 
         return duration, width, height
 
@@ -91,7 +87,7 @@ async def download_video(url, quality):
         "quiet": True,
         "retries": 10,
         "fragment_retries": 10,
-        "concurrent_fragment_downloads": 15,  # unchanged speed
+        "concurrent_fragment_downloads": 15,
         "postprocessors": [{
             "key": "FFmpegVideoRemuxer",
             "preferedformat": "mp4",
@@ -140,17 +136,23 @@ async def quality_handler(event):
         duration, width, height = get_video_metadata(file_path)
         thumbnail = generate_thumbnail(file_path)
 
-        await status_msg.edit("📤 Uploading... 0%")
+        await status_msg.edit("📤 Uploading...")
 
         async def progress(current, total):
             percent = int(current * 100 / total)
             now = time.time()
+            new_text = f"📤 Uploading... {percent}%"
 
-            if now - progress.last_update > 30:
-                await status_msg.edit(f"📤 Uploading... {percent}%")
-                progress.last_update = now
+            if now - progress.last_update > 30 and new_text != progress.last_text:
+                try:
+                    await status_msg.edit(new_text)
+                    progress.last_update = now
+                    progress.last_text = new_text
+                except:
+                    pass
 
         progress.last_update = 0
+        progress.last_text = ""
 
         await client.send_file(
             event.chat_id,
@@ -186,3 +188,4 @@ async def quality_handler(event):
 
 print("🚀 Bot Running...")
 client.run_until_disconnected()
+

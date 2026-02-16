@@ -1,157 +1,150 @@
 import os
 import asyncio
 import yt_dlp
-import time
-import math
-import requests
+import traceback
+from telethon import TelegramClient, events
+from telethon.tl.types import DocumentAttributeVideo
 
-from telethon import TelegramClient, events, types
+# ================== ENV CONFIG ==================
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ================= CONFIG =================
-api_id = int(os.getenv("API_ID"))
-api_hash = os.getenv("API_HASH")
-bot_token = os.getenv("BOT_TOKEN")
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    raise ValueError("Missing API_ID, API_HASH or BOT_TOKEN in Railway Variables")
 
+API_ID = int(API_ID)
+
+SESSION_NAME = "railway_bot"
 DOWNLOAD_PATH = "/tmp"
-THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
 
-client = TelegramClient("bot", api_id, api_hash).start(bot_token=bot_token)
+os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
+# Start bot
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
-# ================= HELPER =================
-def format_duration(seconds):
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
+PENDING = {}
 
-    if h > 0:
-        return f"{h:02}:{m:02}:{s:02}"
-    return f"{m:02}:{s:02}"
+print("🚀 Railway DRM Bot Started...")
 
 
-def download_thumbnail():
-    thumb_path = os.path.join(DOWNLOAD_PATH, "thumb.jpg")
-    r = requests.get(THUMB_URL)
-    with open(thumb_path, "wb") as f:
-        f.write(r.content)
-    return thumb_path
+# ================== UPLOAD PROGRESS ==================
+async def upload_progress(current, total, message):
+    if not total:
+        return
 
+    percent = round(current * 100 / total, 2)
+    filled = int(percent // 5)
+    bar = "█" * filled + "░" * (20 - filled)
 
-# ================= DOWNLOAD =================
-async def download_video(url, quality):
-
-    if quality == "720":
-        format_string = "bestvideo[height<=720]+bestaudio/best[height<=720]"
-    else:
-        format_string = "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-
-    ydl_opts = {
-        "format": format_string,
-        "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
-        "merge_output_format": "mp4",
-        "prefer_ffmpeg": True,
-        "noplaylist": True,
-        "quiet": True,
-        "retries": 10,
-        "fragment_retries": 10,
-        "concurrent_fragment_downloads": 15,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-
-        file_path = ydl.prepare_filename(info)
-        if not file_path.endswith(".mp4"):
-            file_path = file_path.rsplit(".", 1)[0] + ".mp4"
-
-        duration = info.get("duration", 0)
-        width = info.get("width", 1280)
-        height = info.get("height", 720)
-
-        return file_path, duration, width, height
-
-
-# ================= BOT =================
-user_links = {}
-
-@client.on(events.NewMessage(pattern="/drm"))
-async def drm_handler(event):
     try:
-        url = event.text.split(" ", 1)[1]
-        user_links[event.sender_id] = url
-        await event.reply("🎬 Send quality: 720 or 1080")
+        await message.edit(f"📤 Uploading...\n[{bar}] {percent}%")
     except:
-        await event.reply("❌ Use:\n/drm your_link_here")
+        pass
 
 
+# ================== /drm COMMAND ==================
+@client.on(events.NewMessage(pattern=r'^/drm'))
+async def drm_handler(event):
+    parts = event.raw_text.strip().split(maxsplit=1)
+
+    if len(parts) < 2:
+        await event.reply("❌ Usage:\n/drm <video_link>")
+        return
+
+    PENDING[event.chat_id] = parts[1]
+    await event.reply("🎬 Reply with quality:\nSend 720 or 1080")
+
+
+# ================== QUALITY HANDLER ==================
 @client.on(events.NewMessage)
 async def quality_handler(event):
-    if event.sender_id not in user_links:
-        return
-
-    if event.text not in ["720", "1080"]:
-        return
-
-    url = user_links[event.sender_id]
-    quality = event.text
-
-    status_msg = await event.reply("⬇ Downloading...")
-
     try:
-        file_path, duration, width, height = await download_video(url, quality)
+        if event.chat_id not in PENDING:
+            return
 
-        formatted_duration = format_duration(duration)
-        thumbnail = download_thumbnail()
+        if event.raw_text.strip() not in ["720", "1080"]:
+            return
 
-        await status_msg.edit("📤 Uploading...")
+        quality = event.raw_text.strip()
+        url = PENDING[event.chat_id]
 
-        async def progress(current, total):
-            percent = int(current * 100 / total)
-            now = time.time()
-            new_text = f"📤 Uploading... {percent}%"
+        msg = await event.reply("⏳ Downloading...")
 
-            if now - progress.last_update > 30 and new_text != progress.last_text:
-                try:
-                    await status_msg.edit(new_text)
-                    progress.last_update = now
-                    progress.last_text = new_text
-                except:
-                    pass
+        format_string = (
+            f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]"
+        )
 
-        progress.last_update = 0
-        progress.last_text = ""
+        ydl_opts = {
+            "format": format_string,
+            "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "noplaylist": True,
+            "concurrent_fragment_downloads": 5,
+            "ffmpeg_location": "ffmpeg"
+        }
 
+        # DOWNLOAD
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
+
+        if not file_path.endswith(".mp4"):
+            file_path = os.path.splitext(file_path)[0] + ".mp4"
+
+        # Safe edit
+        try:
+            await msg.edit("✅ Download Complete!\n📤 Uploading...")
+        except:
+            pass
+
+        # File size check
+        file_size = os.path.getsize(file_path)
+        print("File size MB:", file_size / (1024 * 1024))
+
+        if file_size > 2 * 1024 * 1024 * 1024:
+            await event.reply("❌ File too large (Over 2GB Telegram limit)")
+            return
+
+        # UPLOAD
         await client.send_file(
             event.chat_id,
             file_path,
-            caption=f"✅ Upload Complete!\n\n⏱ Duration: {formatted_duration}",
-            thumb=thumbnail,
             supports_streaming=True,
             attributes=[
-                types.DocumentAttributeVideo(
-                    duration=int(duration),
-                    w=width,
-                    h=height,
+                DocumentAttributeVideo(
+                    duration=0,
+                    w=0,
+                    h=0,
                     supports_streaming=True
                 )
             ],
-            progress_callback=progress
+            progress_callback=lambda c, t: asyncio.create_task(
+                upload_progress(c, t, msg)
+            )
         )
 
-        await status_msg.edit("✅ Upload Complete!")
+        try:
+            await msg.edit("✅ Upload Complete!")
+        except:
+            pass
 
-        # cleanup
+        # Delete file
         if os.path.exists(file_path):
             os.remove(file_path)
-        if os.path.exists(thumbnail):
-            os.remove(thumbnail)
 
-        del user_links[event.sender_id]
+        del PENDING[event.chat_id]
 
-    except Exception as e:
-        await status_msg.edit(f"❌ Error:\n{str(e)}")
+    except Exception:
+        print(traceback.format_exc())
+        await event.reply("❌ Error occurred.")
 
 
-print("🚀 Bot Running...")
+# ================== RUN BOT ==================
 client.run_until_disconnected()
+
+
+
+
+WORKING C0DE RAILWAY HOST

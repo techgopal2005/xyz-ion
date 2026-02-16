@@ -18,43 +18,50 @@ client = TelegramClient("bot", api_id, api_hash).start(bot_token=bot_token)
 
 # ================= METADATA =================
 def get_video_metadata(video_path):
-    cmd = [
-        "/usr/bin/ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        video_path
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    info = json.loads(result.stdout)
+    try:
+        cmd = [
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            video_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
-    duration = int(float(info["format"]["duration"]))
+        info = json.loads(result.stdout)
 
-    video_stream = next(
-        (stream for stream in info["streams"] if stream["codec_type"] == "video"),
-        None
-    )
+        duration = int(float(info["format"]["duration"]))
 
-    width = video_stream["width"]
-    height = video_stream["height"]
+        video_stream = next(
+            (stream for stream in info["streams"] if stream["codec_type"] == "video"),
+            None
+        )
 
-    return duration, width, height
+        width = video_stream["width"]
+        height = video_stream["height"]
+
+        return duration, width, height
+
+    except:
+        return 0, 1280, 720  # fallback safe
 
 
 def generate_thumbnail(video_path):
     thumb_path = video_path.replace(".mp4", ".jpg")
 
-    subprocess.run([
-        "/usr/bin/ffmpeg",
-        "-ss", "00:00:02",
-        "-i", video_path,
-        "-vframes", "1",
-        "-q:v", "2",
-        thumb_path
-    ])
-
-    return thumb_path
+    try:
+        subprocess.run([
+            "ffmpeg",
+            "-ss", "00:00:02",
+            "-i", video_path,
+            "-vframes", "1",
+            "-q:v", "2",
+            thumb_path
+        ])
+        return thumb_path
+    except:
+        return None
 
 
 # ================= DOWNLOAD =================
@@ -74,7 +81,6 @@ async def download_video(url, quality):
         "retries": 10,
         "fragment_retries": 10,
         "concurrent_fragment_downloads": 10,
-        "ffmpeg_location": "/usr/bin/ffmpeg",
         "postprocessors": [{
             "key": "FFmpegVideoRemuxer",
             "preferedformat": "mp4",
@@ -101,7 +107,7 @@ async def drm_handler(event):
         user_links[event.sender_id] = url
         await event.reply("🎬 Send quality: 720 or 1080")
     except:
-        await event.reply("❌ Send like:\n/drm your_link_here")
+        await event.reply("❌ Use:\n/drm your_link_here")
 
 
 @client.on(events.NewMessage)
@@ -129,7 +135,7 @@ async def quality_handler(event):
             event.chat_id,
             file_path,
             caption="✅ Upload Complete!",
-            thumb=thumbnail,
+            thumb=thumbnail if thumbnail and os.path.exists(thumbnail) else None,
             supports_streaming=True,
             attributes=[
                 types.DocumentAttributeVideo(
@@ -141,15 +147,18 @@ async def quality_handler(event):
             ]
         )
 
-        os.remove(file_path)
-        os.remove(thumbnail)
+        # cleanup
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        if thumbnail and os.path.exists(thumbnail):
+            os.remove(thumbnail)
 
         del user_links[event.sender_id]
 
     except Exception as e:
-        await event.reply(f"❌ Error: {str(e)}")
+        await event.reply(f"❌ Error:\n{str(e)}")
 
 
 print("🚀 Bot Running...")
 client.run_until_disconnected()
-

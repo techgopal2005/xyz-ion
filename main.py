@@ -5,12 +5,17 @@ import traceback
 from telethon import TelegramClient, events
 
 # ================== ENV CONFIG ==================
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    raise ValueError("Missing API_ID, API_HASH or BOT_TOKEN in Railway Variables")
+
+API_ID = int(API_ID)
 
 SESSION_NAME = "render_bot"
-DOWNLOAD_PATH = "/tmp"   # Render temporary storage
+DOWNLOAD_PATH = "/tmp"   # Railway temporary storage
 # ================================================
 
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
@@ -100,7 +105,7 @@ async def quality_handler(event):
 
         await msg.edit("✅ Upload Complete!")
 
-        # Delete file after upload (important for Render)
+        # Delete file after upload (important for Railway)
         if os.path.exists(file_path):
             os.remove(file_path)
 
@@ -111,11 +116,7 @@ async def quality_handler(event):
         await event.reply("❌ Error occurred.")
 
 
-# ================== MAIN ==================
-async def main():
-    print("🚀 Render DRM Bot Started...")
-    await client.run_until_disconnected()
+# ================== RUN BOT ==================
+print("🚀 Railway DRM Bot Started...")
+client.run_until_disconnected()
 
-
-if __name__ == "__main__":
-    asyncio.run(main())

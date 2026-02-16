@@ -52,11 +52,12 @@ def generate_thumbnail(video_path):
     thumb_path = video_path.replace(".mp4", ".jpg")
 
     try:
+        # FIRST FRAME THUMBNAIL
         subprocess.run([
             "ffmpeg",
             "-y",
-            "-ss", "00:00:02",
             "-i", video_path,
+            "-vf", "thumbnail",
             "-frames:v", "1",
             thumb_path
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -157,7 +158,7 @@ async def quality_handler(event):
         await client.send_file(
             event.chat_id,
             file_path,
-            caption="✅ Upload Complete!",
+            caption=f"✅ Upload Complete!\n\n⏱ Duration: {duration} sec",
             thumb=thumbnail,
             supports_streaming=True,
             attributes=[
@@ -188,4 +189,3 @@ async def quality_handler(event):
 
 print("🚀 Bot Running...")
 client.run_until_disconnected()
-

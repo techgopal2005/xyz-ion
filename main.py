@@ -1,9 +1,9 @@
 import os
-import re
 import asyncio
 import yt_dlp
 import subprocess
 import json
+import time
 
 from telethon import TelegramClient, events, types
 
@@ -21,20 +21,24 @@ def get_video_metadata(video_path):
     try:
         cmd = [
             "ffprobe",
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
+            "-v", "error",
+            "-show_entries", "format=duration",
             "-show_streams",
+            "-of", "json",
             video_path
         ]
+
         result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            return 0, 1280, 720
 
         info = json.loads(result.stdout)
 
         duration = int(float(info["format"]["duration"]))
 
         video_stream = next(
-            (stream for stream in info["streams"] if stream["codec_type"] == "video"),
+            (s for s in info["streams"] if s["codec_type"] == "video"),
             None
         )
 
@@ -43,8 +47,9 @@ def get_video_metadata(video_path):
 
         return duration, width, height
 
-    except:
-        return 0, 1280, 720  # fallback safe
+    except Exception as e:
+        print("Metadata Error:", e)
+        return 0, 1280, 720
 
 
 def generate_thumbnail(video_path):
@@ -53,14 +58,19 @@ def generate_thumbnail(video_path):
     try:
         subprocess.run([
             "ffmpeg",
+            "-y",
             "-ss", "00:00:02",
             "-i", video_path,
-            "-vframes", "1",
-            "-q:v", "2",
+            "-frames:v", "1",
             thumb_path
-        ])
-        return thumb_path
-    except:
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        if os.path.exists(thumb_path):
+            return thumb_path
+        return None
+
+    except Exception as e:
+        print("Thumbnail Error:", e)
         return None
 
 
@@ -76,11 +86,12 @@ async def download_video(url, quality):
         "format": format_string,
         "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
         "merge_output_format": "mp4",
+        "prefer_ffmpeg": True,
         "noplaylist": True,
         "quiet": True,
         "retries": 10,
         "fragment_retries": 10,
-        "concurrent_fragment_downloads": 10,
+        "concurrent_fragment_downloads": 15,  # unchanged speed
         "postprocessors": [{
             "key": "FFmpegVideoRemuxer",
             "preferedformat": "mp4",
@@ -121,7 +132,7 @@ async def quality_handler(event):
     url = user_links[event.sender_id]
     quality = event.text
 
-    await event.reply("⬇ Downloading...")
+    status_msg = await event.reply("⬇ Downloading...")
 
     try:
         file_path = await download_video(url, quality)
@@ -129,13 +140,23 @@ async def quality_handler(event):
         duration, width, height = get_video_metadata(file_path)
         thumbnail = generate_thumbnail(file_path)
 
-        await event.reply("📤 Uploading...")
+        await status_msg.edit("📤 Uploading... 0%")
+
+        async def progress(current, total):
+            percent = int(current * 100 / total)
+            now = time.time()
+
+            if now - progress.last_update > 30:
+                await status_msg.edit(f"📤 Uploading... {percent}%")
+                progress.last_update = now
+
+        progress.last_update = 0
 
         await client.send_file(
             event.chat_id,
             file_path,
             caption="✅ Upload Complete!",
-            thumb=thumbnail if thumbnail and os.path.exists(thumbnail) else None,
+            thumb=thumbnail,
             supports_streaming=True,
             attributes=[
                 types.DocumentAttributeVideo(
@@ -144,8 +165,11 @@ async def quality_handler(event):
                     h=height,
                     supports_streaming=True
                 )
-            ]
+            ],
+            progress_callback=progress
         )
+
+        await status_msg.edit("✅ Upload Complete!")
 
         # cleanup
         if os.path.exists(file_path):
@@ -157,7 +181,7 @@ async def quality_handler(event):
         del user_links[event.sender_id]
 
     except Exception as e:
-        await event.reply(f"❌ Error:\n{str(e)}")
+        await status_msg.edit(f"❌ Error:\n{str(e)}")
 
 
 print("🚀 Bot Running...")

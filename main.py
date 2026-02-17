@@ -10,17 +10,17 @@ api_hash = os.getenv("API_HASH")           # Your Telegram API Hash
 BOT_TOKEN = os.getenv("BOT_TOKEN")        # Your bot token
 PREMIUM_USER_ID = int(os.getenv("PREMIUM_USER_ID", 0))  # Telegram user ID
 
-DOWNLOAD_PATH = os.getenv("DOWNLOAD_PATH", "/tmp")
+DOWNLOAD_PATH = "/tmp"  # Railway ephemeral storage
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "")  # Leave blank to use system ffmpeg
 # ============================================
 
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
+# ================== INIT TELETHON BOT ==================
 client = TelegramClient("bot_session", api_id, api_hash).start(bot_token=BOT_TOKEN)
-
 PENDING = {}
 
-# ================== PROGRESS BAR ==================
+# ================== PROGRESS BAR FUNCTION ==================
 async def progress_bar(current, total, message, action):
     if not total or total == 0:
         return
@@ -32,7 +32,7 @@ async def progress_bar(current, total, message, action):
     except:
         pass
 
-# ================== START COMMAND ==================
+# ================== /start COMMAND ==================
 @client.on(events.NewMessage(pattern="/start"))
 async def start_handler(event):
     if event.sender_id == PREMIUM_USER_ID:
@@ -44,7 +44,7 @@ async def start_handler(event):
             link_preview=False
         )
 
-# ================== DRM COMMAND ==================
+# ================== /drm COMMAND ==================
 @client.on(events.NewMessage(pattern=r'^/drm'))
 async def drm_handler(event):
     if event.sender_id != PREMIUM_USER_ID:
@@ -121,10 +121,6 @@ async def quality_handler(event):
         print(traceback.format_exc())
         await event.reply("❌ Error occurred.")
 
-# ================== MAIN ==================
-async def main():
-    print("🤖 Premium DRM Bot Started...")
-    await client.run_until_disconnected()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# ================== START BOT ==================
+print("🤖 Premium DRM Bot Started...")
+client.run_until_disconnected()

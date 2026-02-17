@@ -43,7 +43,7 @@ def download_file(url, out_path):
             file_path = file_path.rsplit(".", 1)[0] + ".mp4"
         return file_path, info.get("duration", 0), info.get("width", 1280), info.get("height", 720)
 
-# ================= USER SESSION =================
+# ================= USER SESSIONS =================
 user_sessions = {}
 
 # ================= /stop HANDLER =================
@@ -54,7 +54,12 @@ async def stop_handler(event):
     key = (user_id, thread_id)
     if key in user_sessions:
         user_sessions[key]['stop'] = True
-        await event.reply("✅ Process Stopped ✔", thread_id=thread_id)
+    # Send stop confirmation
+    msg = "✅ Process Stopped ✔"
+    if thread_id:
+        await client.send_message(event.chat_id, msg, thread_id=thread_id)
+    else:
+        await event.reply(msg)
 
 # ================= /txt HANDLER =================
 @client.on(events.NewMessage(pattern="/txt"))
@@ -63,12 +68,16 @@ async def txt_handler(event):
     thread_id = getattr(event.message, "thread_id", None)
     key = (user_id, thread_id)
 
-    await event.reply(
+    msg_text = (
         "➠ 𝐒𝐞𝐧𝐝 𝐌𝐞 𝐘𝐨𝐮𝐫 𝐓𝐗𝐓 𝐅𝐢𝐥𝐞 𝐢𝐧 𝐀 𝐏𝐫𝐨𝐩𝐞𝐫 𝐖𝐚𝐲 \n\n"
         "➠ TXT FORMAT : FILE NAME : URL/LINK \n"
-        "➠ 𝐌𝐨𝐝𝐢𝐟𝐢𝐞𝐝 𝐁𝐲: @do_land_trump",
-        thread_id=thread_id
+        "➠ 𝐌𝐨𝐝𝐢𝐟𝐢𝐞𝐝 𝐁𝐲: @do_land_trump"
     )
+    if thread_id:
+        await client.send_message(event.chat_id, msg_text, thread_id=thread_id)
+    else:
+        await event.reply(msg_text)
+
     user_sessions[key] = {"state": "waiting_file", "links": [], "stop": False}
 
 # ================= TXT FILE RECEIVED =================
@@ -82,13 +91,17 @@ async def file_handler(event):
         return
 
     if not event.file.name.endswith(".txt"):
-        await event.reply("❌ Only TXT files are supported.", thread_id=thread_id)
+        msg = "❌ Only TXT files are supported."
+        if thread_id:
+            await client.send_message(event.chat_id, msg, thread_id=thread_id)
+        else:
+            await event.reply(msg)
         return
 
     path = os.path.join(DOWNLOAD_PATH, event.file.name)
     await event.download_media(file=path)
 
-    # Process TXT
+    # Parse TXT lines
     links = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -101,7 +114,11 @@ async def file_handler(event):
             links.append({"title": title, "url": url})
 
     if not links:
-        await event.reply("❌ No valid links found in TXT.", thread_id=thread_id)
+        msg = "❌ No valid links found in TXT."
+        if thread_id:
+            await client.send_message(event.chat_id, msg, thread_id=thread_id)
+        else:
+            await event.reply(msg)
         return
 
     mpd_count = sum(1 for l in links if l['url'].endswith(".mpd"))
@@ -110,7 +127,7 @@ async def file_handler(event):
     user_sessions[key]['links'] = links
     user_sessions[key]['state'] = "waiting_start_index"
 
-    await event.reply(
+    msg = (
         f"Total links found are : {len(links)}\n"
         f"┃\n"
         f"┠ Total Video Count : {mpd_count}\n"
@@ -118,11 +135,14 @@ async def file_handler(event):
         f"┠ Send From where you want to download initial is  : 1\n"
         f"┃\n"
         f"┠ Send /stop If don't want to Continue\n"
-        f"┖ Bot By : @do_land_trump",
-        thread_id=thread_id
+        f"┖ Bot By : @do_land_trump"
     )
+    if thread_id:
+        await client.send_message(event.chat_id, msg, thread_id=thread_id)
+    else:
+        await event.reply(msg)
 
-# ================= START / END INDEX HANDLER =================
+# ================= INDEX HANDLER =================
 @client.on(events.NewMessage(func=lambda e: e.text and e.text.isdigit()))
 async def index_handler(event):
     user_id = event.sender_id
@@ -138,17 +158,24 @@ async def index_handler(event):
     if session.get('state') == "waiting_start_index":
         start = int(event.text)
         if start < 1 or start > len(session['links']):
-            await event.reply(f"❌ Invalid start index. Must be 1-{len(session['links'])}", thread_id=thread_id)
+            msg = f"❌ Invalid start index. Must be 1-{len(session['links'])}"
+            if thread_id:
+                await client.send_message(event.chat_id, msg, thread_id=thread_id)
+            else:
+                await event.reply(msg)
             return
         session['start_index'] = start - 1
         session['state'] = "waiting_end_index"
-        await event.reply(
+        msg = (
             f"ENTER TILL WHERE YOU WANT TO DOWNLOAD \n"
             f"┃\n"
             f"┠ Starting Download From : {start}\n"
-            f"┖ Last Index Of Links is : {len(session['links'])}",
-            thread_id=thread_id
+            f"┖ Last Index Of Links is : {len(session['links'])}"
         )
+        if thread_id:
+            await client.send_message(event.chat_id, msg, thread_id=thread_id)
+        else:
+            await event.reply(msg)
         return
 
     # End index
@@ -156,7 +183,11 @@ async def index_handler(event):
         end = int(event.text)
         start_index = session['start_index']
         if end <= start_index or end > len(session['links']):
-            await event.reply(f"❌ Invalid end index. Must be {start_index+1}-{len(session['links'])}", thread_id=thread_id)
+            msg = f"❌ Invalid end index. Must be {start_index+1}-{len(session['links'])}"
+            if thread_id:
+                await client.send_message(event.chat_id, msg, thread_id=thread_id)
+            else:
+                await event.reply(msg)
             return
         session['end_index'] = end
         session['state'] = "downloading"
@@ -175,7 +206,12 @@ async def download_links(event, session, key):
         title = item['title']
         url = item['url']
         try:
-            status_msg = await event.reply(f"⬇ Downloading {title}...", thread_id=thread_id)
+            status_msg_text = f"⬇ Downloading {title}..."
+            if thread_id:
+                status_msg = await client.send_message(chat_id, status_msg_text, thread_id=thread_id)
+            else:
+                status_msg = await event.reply(status_msg_text)
+
             if url.endswith(".pdf"):
                 out_path = os.path.join(DOWNLOAD_PATH, url.split("/")[-1])
                 r = requests.get(url)
@@ -185,7 +221,7 @@ async def download_links(event, session, key):
                 os.remove(out_path)
             else:  # video
                 success = False
-                for res in ["1080", "720", "480"]:
+                for _ in ["1080", "720", "480"]:
                     try:
                         file_path, duration, width, height = download_file(url, os.path.join(DOWNLOAD_PATH, f"{title}.mp4"))
                         await client.send_file(
@@ -202,16 +238,34 @@ async def download_links(event, session, key):
                     except:
                         continue
                 if not success:
-                    await event.reply(f"❌ Download Failed\n\nFailed Index : {idx}\nTitle : {title}", thread_id=thread_id)
+                    msg = f"❌ Download Failed\n\nFailed Index : {idx}\nTitle : {title}"
+                    if thread_id:
+                        await client.send_message(chat_id, msg, thread_id=thread_id)
+                    else:
+                        await event.reply(msg)
                     session['stop'] = True
                     break
-            await status_msg.delete()
+            # remove status
+            try:
+                await status_msg.delete()
+            except:
+                pass
         except Exception as e:
-            await event.reply(f"❌ Download Failed\n\nFailed Index : {idx}\nTitle : {title}", thread_id=thread_id)
+            msg = f"❌ Download Failed\n\nFailed Index : {idx}\nTitle : {title}"
+            if thread_id:
+                await client.send_message(chat_id, msg, thread_id=thread_id)
+            else:
+                await event.reply(msg)
             session['stop'] = True
             break
+
     if not session['stop']:
-        await event.reply("✅ All downloads completed!", thread_id=thread_id)
+        msg = "✅ All downloads completed!"
+        if thread_id:
+            await client.send_message(chat_id, msg, thread_id=thread_id)
+        else:
+            await event.reply(msg)
+
     user_sessions.pop(key, None)
 
 # ================= RUN BOT =================

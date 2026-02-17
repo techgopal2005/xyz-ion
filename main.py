@@ -4,6 +4,7 @@ import yt_dlp
 import time
 import requests
 from telethon import TelegramClient, events, types
+from telethon.errors import FloodWaitError
 
 # ================= CONFIG =================
 api_id = int(os.getenv("API_ID"))
@@ -12,18 +13,15 @@ bot_token = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_PATH = "/tmp"
 THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
-
-# Persistent session file to avoid FloodWait
-SESSION_NAME = "bot_session"
+SESSION_NAME = "bot_session"  # Persistent session file to avoid FloodWait
 
 client = TelegramClient(SESSION_NAME, api_id, api_hash)
 
 # ================= GLOBALS =================
-user_txt_files = {}  # {user_id: {"file_path": ..., "links": [...], "stop": False}}
-user_download_tasks = {}  # track ongoing tasks
+user_links = {}
+stop_flags = {}
 
-
-# ================= HELPER =================
+# ================= HELPERS =================
 def format_duration(seconds):
     seconds = int(seconds)
     h = seconds // 3600
@@ -33,7 +31,6 @@ def format_duration(seconds):
         return f"{h:02}:{m:02}:{s:02}"
     return f"{m:02}:{s:02}"
 
-
 def download_thumbnail():
     thumb_path = os.path.join(DOWNLOAD_PATH, "thumb.jpg")
     r = requests.get(THUMB_URL)
@@ -41,185 +38,156 @@ def download_thumbnail():
         f.write(r.content)
     return thumb_path
 
+def parse_txt(file_path):
+    links = []
+    total_pdf = total_video = 0
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if ": http" in line:
+                title = line.split(": http")[0].strip()
+                url = "http" + line.split(": http")[1].strip()
+                links.append((title, url))
+                if url.endswith(".pdf"):
+                    total_pdf += 1
+                elif url.endswith(".mpd"):
+                    total_video += 1
+    return links, total_video, total_pdf
 
+# ================= DOWNLOAD =================
 async def download_video(url, quality):
-    if quality == "720":
-        format_string = "bestvideo[height<=720]+bestaudio/best[height<=720]"
-    elif quality == "480":
-        format_string = "bestvideo[height<=480]+bestaudio/best[height<=480]"
-    else:
-        format_string = "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+    # Fallback logic
+    qualities = {"1080": "best[height<=1080]", "720": "best[height<=720]", "480": "best[height<=480]"}
+    q_list = [quality] + [q for q in ["1080", "720", "480"] if q != quality]
 
-    ydl_opts = {
-        "format": format_string,
-        "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
-        "merge_output_format": "mp4",
-        "prefer_ffmpeg": True,
-        "noplaylist": True,
-        "quiet": True,
-        "retries": 10,
-        "fragment_retries": 10,
-        "concurrent_fragment_downloads": 15,
-    }
+    for q in q_list:
+        try:
+            ydl_opts = {
+                "format": qualities[q],
+                "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
+                "merge_output_format": "mp4",
+                "prefer_ffmpeg": True,
+                "noplaylist": True,
+                "quiet": True,
+                "retries": 10,
+                "fragment_retries": 10,
+                "concurrent_fragment_downloads": 15,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info)
+                if not file_path.endswith(".mp4"):
+                    file_path = file_path.rsplit(".", 1)[0] + ".mp4"
+                duration = info.get("duration", 0)
+                width = info.get("width", 1280)
+                height = info.get("height", 720)
+                return file_path, duration, width, height
+        except Exception:
+            continue
+    raise Exception("All qualities failed")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        file_path = ydl.prepare_filename(info)
-        if not file_path.endswith(".mp4"):
-            file_path = file_path.rsplit(".", 1)[0] + ".mp4"
-        duration = info.get("duration", 0)
-        width = info.get("width", 1280)
-        height = info.get("height", 720)
-        return file_path, duration, width, height
+# ================= BOT HANDLERS =================
+@client.on(events.NewMessage(pattern="/start"))
+async def start_handler(event):
+    await event.reply("🚀 Bot is running!")
 
+@client.on(events.NewMessage(pattern="/stop"))
+async def stop_handler(event):
+    stop_flags[event.sender_id] = True
+    await event.reply("🛑 Process stopped!")
 
-# ================= COMMANDS =================
 @client.on(events.NewMessage(pattern="/txt"))
 async def txt_handler(event):
-    user_id = event.sender_id
-    if user_id in user_txt_files:
-        # Already asked once, ignore duplicate
+    sender = event.sender_id
+    if sender in user_links:
+        # Already waiting for TXT
         return
-
-    user_txt_files[user_id] = {"file_path": None, "links": [], "stop": False}
-
+    user_links[sender] = None
+    stop_flags[sender] = False
     await event.reply(
         "➠ 𝐒𝐞𝐧𝐝 𝐌𝐞 𝐘𝐨𝐮𝐫 𝐓𝐗𝐓 𝐅𝐢𝐥𝐞 𝐢𝐧 𝐀 𝐏𝐫𝐨𝐩𝐞𝐫 𝐖𝐚𝐲\n\n"
         "➠ TXT FORMAT : FILE NAME : URL/LINK\n"
         "➠ 𝐌𝐨𝐝𝐢𝐟𝐢𝐞𝐝 𝐁𝐲: @do_land_trump"
     )
 
-
 @client.on(events.NewMessage)
-async def file_receive_handler(event):
-    user_id = event.sender_id
-    if user_id not in user_txt_files:
+async def file_handler(event):
+    sender = event.sender_id
+    if sender not in user_links or stop_flags.get(sender):
         return
 
-    # Handle stop
-    if event.text.lower() == "/stop":
-        user_txt_files[user_id]["stop"] = True
-        task = user_download_tasks.get(user_id)
-        if task and not task.done():
-            task.cancel()
-        await event.reply("✅ Process stopped.")
+    # TXT file processing
+    if event.message.file and event.message.file.name.endswith(".txt"):
+        path = await event.message.download_media(DOWNLOAD_PATH)
+        links, total_video, total_pdf = parse_txt(path)
+        user_links[sender] = links
+
+        if not links:
+            await event.reply("❌ No valid links found in TXT.")
+            return
+
+        await event.reply(
+            f"Total links found: {len(links)}\n"
+            f"┃\n"
+            f"┠ Total Video Count: {total_video}\n"
+            f"┠ Total PDF Count: {total_pdf}\n"
+            f"┖ Bot By: @do_land_trump\n"
+            f"Send the starting number to begin download (example: 1)"
+        )
         return
 
-    if not event.file:
-        return  # ignore non-file messages
+    # If user sends starting number
+    if user_links[sender] and event.text.isdigit():
+        start_idx = int(event.text) - 1
+        links = user_links[sender]
+        thumbnail = download_thumbnail()
 
-    if not event.file.name.endswith(".txt"):
-        await event.reply("❌ Please send a proper TXT file.")
-        return
+        for idx, (title, url) in enumerate(links[start_idx:], start=start_idx):
+            if stop_flags.get(sender):
+                await event.reply("🛑 Process stopped!")
+                break
+            try:
+                status_msg = await event.reply(f"⬇ Downloading {title}...")
+                file_path, duration, width, height = await download_video(url, "1080")
+                formatted_duration = format_duration(duration)
 
-    # Save file locally
-    file_path = os.path.join(DOWNLOAD_PATH, f"{user_id}_input.txt")
-    await client.download_media(event.message, file_path)
-    user_txt_files[user_id]["file_path"] = file_path
+                # Animated upload progress
+                async def progress(current, total):
+                    percent = int(current * 100 / total)
+                    await status_msg.edit(f"📤 Uploading {title}... {percent}%")
 
-    # Read and parse links
-    links = []
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if ": http" in line or ": https" in line:
-                parts = line.split(": http")
-                title = parts[0].strip()
-                url = "http" + parts[1].strip()
-                links.append((title, url))
+                await client.send_file(
+                    event.chat_id,
+                    file_path,
+                    caption=title,
+                    thumb=thumbnail,
+                    supports_streaming=True,
+                    attributes=[
+                        types.DocumentAttributeVideo(
+                            duration=int(duration),
+                            w=width,
+                            h=height,
+                            supports_streaming=True
+                        )
+                    ],
+                    progress_callback=progress
+                )
+                await status_msg.edit(f"✅ Upload Complete: {title}")
 
-    if not links:
-        await event.reply("❌ No valid links found in TXT.")
-        return
-
-    user_txt_files[user_id]["links"] = links
-
-    # Send total count
-    total_videos = len([1 for t, u in links if ".mpd" in u])
-    total_pdfs = len([1 for t, u in links if ".pdf" in u])
-    await event.reply(
-        f"Total links found: {len(links)}\n"
-        f"┃\n"
-        f"┠ Total Video Count: {total_videos}\n"
-        f"┠ Total PDF Count: {total_pdfs}\n"
-        f"┠ Send From where you want to download initial (default 1): 1\n"
-        f"┃\n"
-        f"┠ Send /stop if you don't want to continue\n"
-        f"┖ Bot By: @do_land_trump"
-    )
-
-
-# ================= DOWNLOAD LOOP =================
-async def start_download(user_id, chat_id, quality="1080"):
-    user_data = user_txt_files[user_id]
-    links = user_data["links"]
-    thumb = download_thumbnail()
-
-    for idx, (title, url) in enumerate(links, start=1):
-        if user_data["stop"]:
-            await client.send_message(chat_id, "✅ Download stopped.")
-            break
-
-        status_msg = await client.send_message(chat_id, f"⬇ Downloading {title}...")
-        try:
-            # Attempt 1080 → 720 → 480
-            for q in ([quality] if quality != "720" else ["720", "480"]):
-                try:
-                    file_path, duration, w, h = await download_video(url, q)
-                    break
-                except Exception:
-                    continue
-            else:
-                await client.send_message(chat_id, f"❌ Failed at index {idx}: {title}")
+                # cleanup
+                os.remove(file_path)
+            except Exception as e:
+                await event.reply(f"❌ Failed at index {idx+1}: {title}")
                 break
 
-            formatted_duration = format_duration(duration)
+        user_links.pop(sender, None)
+        stop_flags.pop(sender, None)
 
-            # Animated upload progress
-            async def progress(current, total):
-                percent = int(current * 100 / total)
-                now = time.time()
-                new_text = f"📤 Uploading {title}: {percent}%"
-                if now - progress.last_update > 1 and new_text != progress.last_text:
-                    try:
-                        await status_msg.edit(new_text)
-                        progress.last_update = now
-                        progress.last_text = new_text
-                    except:
-                        pass
-
-            progress.last_update = 0
-            progress.last_text = ""
-
-            await client.send_file(
-                chat_id,
-                file_path,
-                caption=title,
-                thumb=thumb,
-                supports_streaming=True,
-                attributes=[types.DocumentAttributeVideo(duration=int(duration), w=w, h=h)],
-                progress_callback=progress
-            )
-            await status_msg.edit(f"✅ Uploaded {title} successfully!")
-
-            # cleanup
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-        except asyncio.CancelledError:
-            await client.send_message(chat_id, "✅ Process cancelled.")
-            break
-
-    if os.path.exists(thumb):
-        os.remove(thumb)
-
-
-# ================= START BOT =================
+# ================= MAIN =================
 async def main():
     await client.start(bot_token=bot_token)
     print("🚀 Bot Running...")
     await client.run_until_disconnected()
-
 
 if __name__ == "__main__":
     asyncio.run(main())

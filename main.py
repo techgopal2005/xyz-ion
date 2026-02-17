@@ -26,7 +26,7 @@ def format_duration(seconds):
     return f"{m:02}:{s:02}"
 
 def download_file(url, out_path):
-    """Download .mpd video using yt_dlp"""
+    """Download video using yt_dlp"""
     ydl_opts = {
         "outtmpl": out_path,
         "merge_output_format": "mp4",
@@ -54,7 +54,6 @@ async def stop_handler(event):
     key = (user_id, thread_id)
     if key in user_sessions:
         user_sessions[key]['stop'] = True
-    # Send stop confirmation
     msg = "✅ Process Stopped ✔"
     if thread_id:
         await client.send_message(event.chat_id, msg, thread_id=thread_id)
@@ -68,16 +67,22 @@ async def txt_handler(event):
     thread_id = getattr(event.message, "thread_id", None)
     key = (user_id, thread_id)
 
+    # Only ask once if already waiting
+    if key in user_sessions and user_sessions[key].get("state") == "waiting_file":
+        return
+
     msg_text = (
         "➠ 𝐒𝐞𝐧𝐝 𝐌𝐞 𝐘𝐨𝐮𝐫 𝐓𝐗𝐓 𝐅𝐢𝐥𝐞 𝐢𝐧 𝐀 𝐏𝐫𝐨𝐩𝐞𝐫 𝐖𝐚𝐲 \n\n"
         "➠ TXT FORMAT : FILE NAME : URL/LINK \n"
         "➠ 𝐌𝐨𝐝𝐢𝐟𝐢𝐞𝐝 𝐁𝐲: @do_land_trump"
     )
+
     if thread_id:
         await client.send_message(event.chat_id, msg_text, thread_id=thread_id)
     else:
         await event.reply(msg_text)
 
+    # Mark session waiting for file
     user_sessions[key] = {"state": "waiting_file", "links": [], "stop": False}
 
 # ================= TXT FILE RECEIVED =================
@@ -194,7 +199,7 @@ async def index_handler(event):
         asyncio.create_task(download_links(event, session, key))
         return
 
-# ================= DOWNLOAD FUNCTION =================
+# ================= DOWNLOAD FUNCTION WITH PROGRESS =================
 async def download_links(event, session, key):
     thread_id = getattr(event.message, "thread_id", None)
     chat_id = event.chat_id
@@ -217,21 +222,16 @@ async def download_links(event, session, key):
                 r = requests.get(url)
                 with open(out_path, "wb") as f:
                     f.write(r.content)
-                await client.send_file(chat_id, out_path, caption=title, thread_id=thread_id)
+                # Animated progress while sending file
+                await send_file_with_progress(chat_id, out_path, title, thread_id)
                 os.remove(out_path)
             else:  # video
                 success = False
                 for _ in ["1080", "720", "480"]:
                     try:
-                        file_path, duration, width, height = download_file(url, os.path.join(DOWNLOAD_PATH, f"{title}.mp4"))
-                        await client.send_file(
-                            chat_id,
-                            file_path,
-                            caption=title,
-                            supports_streaming=True,
-                            attributes=[types.DocumentAttributeVideo(duration=int(duration), w=width, h=height, supports_streaming=True)],
-                            thread_id=thread_id
-                        )
+                        out_path = os.path.join(DOWNLOAD_PATH, f"{title}.mp4")
+                        file_path, duration, width, height = download_file(url, out_path)
+                        await send_file_with_progress(chat_id, file_path, title, thread_id, duration, width, height)
                         os.remove(file_path)
                         success = True
                         break
@@ -245,12 +245,13 @@ async def download_links(event, session, key):
                         await event.reply(msg)
                     session['stop'] = True
                     break
-            # remove status
+
             try:
                 await status_msg.delete()
             except:
                 pass
-        except Exception as e:
+
+        except Exception:
             msg = f"❌ Download Failed\n\nFailed Index : {idx}\nTitle : {title}"
             if thread_id:
                 await client.send_message(chat_id, msg, thread_id=thread_id)
@@ -267,6 +268,46 @@ async def download_links(event, session, key):
             await event.reply(msg)
 
     user_sessions.pop(key, None)
+
+# ================= SEND FILE WITH ANIMATED PROGRESS =================
+async def send_file_with_progress(chat_id, file_path, caption, thread_id=None, duration=0, width=1280, height=720):
+    progress_msg = None
+    last_percent = 0
+
+    async def progress(current, total):
+        nonlocal progress_msg, last_percent
+        percent = int(current * 100 / total)
+        if percent - last_percent >= 5:  # update every 5%
+            text = f"📤 Uploading {caption}... {percent}%"
+            if progress_msg:
+                try:
+                    await progress_msg.edit(text)
+                except:
+                    pass
+            last_percent = percent
+
+    if thread_id:
+        progress_msg = await client.send_message(chat_id, f"📤 Uploading {caption}... 0%", thread_id=thread_id)
+    else:
+        progress_msg = await client.send_message(chat_id, f"📤 Uploading {caption}... 0%")
+
+    if file_path.endswith(".mp4"):
+        await client.send_file(
+            chat_id,
+            file_path,
+            caption=caption,
+            supports_streaming=True,
+            attributes=[types.DocumentAttributeVideo(duration=int(duration), w=width, h=height, supports_streaming=True)],
+            progress_callback=progress,
+            thread_id=thread_id
+        )
+    else:  # PDF
+        await client.send_file(chat_id, file_path, caption=caption, progress_callback=progress, thread_id=thread_id)
+
+    try:
+        await progress_msg.delete()
+    except:
+        pass
 
 # ================= RUN BOT =================
 print("🚀 Bot Running...")

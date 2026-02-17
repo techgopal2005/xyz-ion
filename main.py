@@ -1,10 +1,9 @@
-
 import os
 import asyncio
 import yt_dlp
 import time
-import math
 import requests
+
 from telethon import TelegramClient, events, types
 
 # ================= CONFIG =================
@@ -15,15 +14,7 @@ bot_token = os.getenv("BOT_TOKEN")
 DOWNLOAD_PATH = "/tmp"
 THUMB_URL = "https://static.pw.live/5eb393ee95fab7468a79d189/ADMIN/6e008265-fef8-4357-a290-07e1da1ff964.png"
 
-# Set your target group/channel and optional topic_id
-TARGET_GROUP = os.getenv("TARGET_GROUP")  # example: -1001234567890 or "@groupusername"
-TOPIC_ID = int(os.getenv("TOPIC_ID", 0))  # 0 if no topic
-
 client = TelegramClient("bot", api_id, api_hash).start(bot_token=bot_token)
-
-# ================= GLOBALS =================
-user_links = {}
-stop_flags = {}
 
 # ================= HELPERS =================
 def format_duration(seconds):
@@ -42,151 +33,166 @@ def download_thumbnail():
         f.write(r.content)
     return thumb_path
 
-def parse_txt(file_path):
-    links = []
-    total_pdf = total_video = 0
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if ": http" in line:
-                title = line.split(": http")[0].strip()
-                url = "http" + line.split(": http")[1].strip()
-                links.append((title, url))
-                if url.endswith(".pdf"):
-                    total_pdf += 1
-                else:
-                    total_video += 1
-    return links, total_video, total_pdf
-
-# ================= DOWNLOAD =================
-async def download_video(url):
-    qualities = ["720", "480"]
-    for q in qualities:
-        try:
-            format_string = f"bestvideo[height<={q}]+bestaudio/best[height<={q}]"
-            ydl_opts = {
-                "format": format_string,
-                "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
-                "merge_output_format": "mp4",
-                "prefer_ffmpeg": True,
-                "noplaylist": True,
-                "quiet": True,
-                "retries": 10,
-                "fragment_retries": 10,
-                "concurrent_fragment_downloads": 45,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                file_path = ydl.prepare_filename(info)
-                if not file_path.endswith(".mp4"):
-                    file_path = file_path.rsplit(".", 1)[0] + ".mp4"
-                duration = info.get("duration", 0)
-                width = info.get("width", 1280)
-                height = info.get("height", 720)
-                return file_path, duration, width, height
-        except Exception:
-            continue
-    raise Exception("❌ Video download failed")
-
-async def download_pdf(url, title):
-    file_name = os.path.join(DOWNLOAD_PATH, f"{title}.pdf")
+def download_pdf(url):
+    local_filename = os.path.join(DOWNLOAD_PATH, url.split("/")[-1].split("?")[0])
     r = requests.get(url, stream=True)
-    total = int(r.headers.get("content-length", 0))
-    with open(file_name, "wb") as f:
-        downloaded = 0
-        start = time.time()
-        for chunk in r.iter_content(1024*1024):
+    r.raise_for_status()
+    with open(local_filename, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
-                downloaded += len(chunk)
-                percent = int(downloaded * 100 / total) if total else 0
-                now = time.time()
-                if now - download_pdf.last_update > 1:
-                    print(f"⬇ Downloading PDF {title}... {percent}%")
-                    download_pdf.last_update = now
-    download_pdf.last_update = 0
-    return file_name
-download_pdf.last_update = 0
+    return local_filename
+
+# ================= DOWNLOAD =================
+async def download_video(url, quality):
+    loop = asyncio.get_event_loop()
+
+    def run():
+        if quality == "720":
+            format_string = "bestvideo[height<=720]+bestaudio/best[height<=720]"
+        else:
+            format_string = "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+
+        ydl_opts = {
+            "format": format_string,
+            "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
+            "merge_output_format": "mp4",
+            "prefer_ffmpeg": True,
+            "noplaylist": True,
+            "quiet": True,
+            "retries": 10,
+            "fragment_retries": 10,
+            "concurrent_fragment_downloads": 10,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
+            if not file_path.endswith(".mp4"):
+                file_path = file_path.rsplit(".", 1)[0] + ".mp4"
+
+            duration = info.get("duration", 0)
+            width = info.get("width", 1280)
+            height = info.get("height", 720)
+            return file_path, duration, width, height
+
+    return await loop.run_in_executor(None, run)
 
 # ================= BOT =================
-@client.on(events.NewMessage(pattern="/txt"))
-async def txt_handler(event):
-    sender = event.sender_id
-    if sender in user_links:
-        return
-    user_links[sender] = None
-    stop_flags[sender] = False
-    await event.reply(
-        "➠ Send your TXT file in proper format:\n"
-        "FORMAT: FILE NAME : URL\n"
-        "Bot will upload all PDFs and videos to the group/topic."
-    )
+user_links = {}
+
+@client.on(events.NewMessage(pattern="/drm"))
+async def drm_handler(event):
+    try:
+        url = event.text.split(" ", 1)[1]
+        user_links[event.sender_id] = url
+
+        if ".pdf" in url.lower():
+            await event.reply("📄 PDF detected. Downloading...")
+            await handle_pdf(event, url)
+        else:
+            await event.reply("🎬 Send quality: 720 or 1080")
+
+    except:
+        await event.reply("❌ Use:\n/drm your_link_here")
 
 @client.on(events.NewMessage)
-async def file_handler(event):
-    sender = event.sender_id
-    if sender not in user_links or stop_flags.get(sender):
+async def quality_handler(event):
+    if event.sender_id not in user_links:
         return
 
-    # TXT file processing
-    if event.message.file and event.message.file.name.endswith(".txt"):
-        path = await event.message.download_media(DOWNLOAD_PATH)
-        links, total_video, total_pdf = parse_txt(path)
-        user_links[sender] = links
+    if event.text not in ["720", "1080"]:
+        return
 
-        if not links:
-            await event.reply("❌ No valid links found in TXT.")
+    url = user_links[event.sender_id]
+    quality = event.text
+
+    status_msg = await event.reply("⬇ Downloading...")
+
+    try:
+        file_path, duration, width, height = await download_video(url, quality)
+
+        # Check Telegram size limit
+        file_size = os.path.getsize(file_path)
+        if file_size > 1900 * 1024 * 1024:
+            await status_msg.edit("❌ File too large for Telegram (over 2GB).")
+            os.remove(file_path)
             return
 
-        await event.reply(
-            f"Found {len(links)} links ({total_video} videos, {total_pdf} PDFs).\n"
-            f"Starting upload to group..."
-        )
-
+        formatted_duration = format_duration(duration)
         thumbnail = download_thumbnail()
 
-        for idx, (title, url) in enumerate(links, start=1):
-            if stop_flags.get(sender):
-                break
-            try:
-                status_msg = await event.reply(f"⬇ Processing {title}...")
-                if url.endswith(".pdf"):
-                    file_path = await download_pdf(url, title)
-                    await client.send_file(
-                        TARGET_GROUP,
-                        file_path,
-                        caption=f"📄 {title}",
-                        force_document=True,
-                        reply_to=TOPIC_ID if TOPIC_ID else None
-                    )
-                else:
-                    try:
-                        file_path, duration, width, height = await download_video(url)
-                        formatted_duration = format_duration(duration)
-                        await client.send_file(
-                            TARGET_GROUP,
-                            file_path,
-                            caption=f"🎬 {title}\n⏱ Duration: {formatted_duration}",
-                            thumb=thumbnail,
-                            supports_streaming=True,
-                            attributes=[types.DocumentAttributeVideo(
-                                duration=int(duration),
-                                w=width,
-                                h=height,
-                                supports_streaming=True
-                            )],
-                            progress_callback=lambda cur, total: print(f"⬇ Downloading {title}: {int(cur*100/total)}%")
-                        )
-                    except Exception:
-                        await event.reply(f"❌ FAILED INDEX: {idx} | TITLE: {title}")
-                        continue
-                # cleanup
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception as e:
-                await event.reply(f"❌ Error: {str(e)}")
-        user_links.pop(sender, None)
-        stop_flags.pop(sender, None)
+        await status_msg.edit("📤 Uploading...")
+
+        async def progress(current, total):
+            percent = int(current * 100 / total)
+            now = time.time()
+            if now - progress.last_update > 10:
+                try:
+                    await status_msg.edit(f"📤 Uploading... {percent}%")
+                    progress.last_update = now
+                except:
+                    pass
+
+        progress.last_update = 0
+
+        await client.send_file(
+            event.chat_id,
+            file_path,
+            caption=f"✅ Upload Complete!\n\n⏱ Duration: {formatted_duration}",
+            thumb=thumbnail,
+            supports_streaming=True,
+            attributes=[
+                types.DocumentAttributeVideo(
+                    duration=int(duration),
+                    w=width,
+                    h=height,
+                    supports_streaming=True
+                )
+            ],
+            progress_callback=progress
+        )
+
+        await status_msg.edit("✅ Upload Complete!")
+
+        # cleanup
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if os.path.exists(thumbnail):
+            os.remove(thumbnail)
+
+        del user_links[event.sender_id]
+
+    except Exception as e:
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)
+        await status_msg.edit(f"❌ Error:\n{str(e)}")
+
+# ================= PDF HANDLER =================
+async def handle_pdf(event, url):
+    status_msg = await event.reply("⬇ Downloading PDF...")
+
+    try:
+        file_path = download_pdf(url)
+        await status_msg.edit("📤 Uploading PDF...")
+
+        await client.send_file(
+            event.chat_id,
+            file_path,
+            caption="✅ PDF Upload Complete!"
+        )
+
+        await status_msg.edit("✅ PDF Upload Complete!")
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        del user_links[event.sender_id]
+
+    except Exception as e:
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)
+        await status_msg.edit(f"❌ Error:\n{str(e)}")
 
 print("🚀 Bot Running...")
 client.run_until_disconnected()

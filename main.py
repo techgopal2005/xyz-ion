@@ -11,6 +11,7 @@ api_hash = os.getenv("API_HASH")
 bot_token = os.getenv("BOT_TOKEN")
 
 DOWNLOAD_PATH = "/tmp"
+os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
 client = TelegramClient("bot", api_id, api_hash).start(bot_token=bot_token)
 
@@ -25,25 +26,22 @@ def format_duration(seconds):
     return f"{m:02}:{s:02}"
 
 def download_file(url, out_path):
-    # Download .pdf or .mpd file
-    try:
-        ydl_opts = {
-            "outtmpl": out_path,
-            "merge_output_format": "mp4",
-            "prefer_ffmpeg": True,
-            "noplaylist": True,
-            "quiet": True,
-            "retries": 5,
-            "fragment_retries": 5,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
-            if not file_path.endswith(".mp4") and url.endswith(".mpd"):
-                file_path = file_path.rsplit(".", 1)[0] + ".mp4"
-            return file_path, info.get("duration", 0), info.get("width", 1280), info.get("height", 720)
-    except Exception as e:
-        raise e
+    """Download .mpd video using yt_dlp"""
+    ydl_opts = {
+        "outtmpl": out_path,
+        "merge_output_format": "mp4",
+        "prefer_ffmpeg": True,
+        "noplaylist": True,
+        "quiet": True,
+        "retries": 5,
+        "fragment_retries": 5,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        file_path = ydl.prepare_filename(info)
+        if not file_path.endswith(".mp4") and url.endswith(".mpd"):
+            file_path = file_path.rsplit(".", 1)[0] + ".mp4"
+        return file_path, info.get("duration", 0), info.get("width", 1280), info.get("height", 720)
 
 # ================= USER SESSION =================
 user_sessions = {}
@@ -52,7 +50,7 @@ user_sessions = {}
 @client.on(events.NewMessage(pattern="/stop"))
 async def stop_handler(event):
     user_id = event.sender_id
-    thread_id = event.message.thread_id
+    thread_id = getattr(event.message, "thread_id", None)
     key = (user_id, thread_id)
     if key in user_sessions:
         user_sessions[key]['stop'] = True
@@ -62,7 +60,7 @@ async def stop_handler(event):
 @client.on(events.NewMessage(pattern="/txt"))
 async def txt_handler(event):
     user_id = event.sender_id
-    thread_id = event.message.thread_id
+    thread_id = getattr(event.message, "thread_id", None)
     key = (user_id, thread_id)
 
     await event.reply(
@@ -71,14 +69,13 @@ async def txt_handler(event):
         "➠ 𝐌𝐨𝐝𝐢𝐟𝐢𝐞𝐝 𝐁𝐲: @do_land_trump",
         thread_id=thread_id
     )
-    # Initialize session
     user_sessions[key] = {"state": "waiting_file", "links": [], "stop": False}
 
 # ================= TXT FILE RECEIVED =================
 @client.on(events.NewMessage(func=lambda e: e.file is not None))
 async def file_handler(event):
     user_id = event.sender_id
-    thread_id = event.message.thread_id
+    thread_id = getattr(event.message, "thread_id", None)
     key = (user_id, thread_id)
 
     if key not in user_sessions or user_sessions[key]['state'] != "waiting_file":
@@ -125,11 +122,11 @@ async def file_handler(event):
         thread_id=thread_id
     )
 
-# ================= START INDEX RECEIVED =================
+# ================= START / END INDEX HANDLER =================
 @client.on(events.NewMessage(func=lambda e: e.text and e.text.isdigit()))
-async def start_index_handler(event):
+async def index_handler(event):
     user_id = event.sender_id
-    thread_id = event.message.thread_id
+    thread_id = getattr(event.message, "thread_id", None)
     key = (user_id, thread_id)
 
     if key not in user_sessions:
@@ -137,10 +134,11 @@ async def start_index_handler(event):
 
     session = user_sessions[key]
 
+    # Start index
     if session.get('state') == "waiting_start_index":
         start = int(event.text)
         if start < 1 or start > len(session['links']):
-            await event.reply(f"❌ Invalid start index. Must be between 1 and {len(session['links'])}", thread_id=thread_id)
+            await event.reply(f"❌ Invalid start index. Must be 1-{len(session['links'])}", thread_id=thread_id)
             return
         session['start_index'] = start - 1
         session['state'] = "waiting_end_index"
@@ -153,11 +151,12 @@ async def start_index_handler(event):
         )
         return
 
+    # End index
     if session.get('state') == "waiting_end_index":
         end = int(event.text)
         start_index = session['start_index']
         if end <= start_index or end > len(session['links']):
-            await event.reply(f"❌ Invalid end index. Must be between {start_index+1} and {len(session['links'])}", thread_id=thread_id)
+            await event.reply(f"❌ Invalid end index. Must be {start_index+1}-{len(session['links'])}", thread_id=thread_id)
             return
         session['end_index'] = end
         session['state'] = "downloading"
@@ -166,9 +165,9 @@ async def start_index_handler(event):
 
 # ================= DOWNLOAD FUNCTION =================
 async def download_links(event, session, key):
-    thread_id = event.message.thread_id
-    links = session['links'][session['start_index']:session['end_index']]
+    thread_id = getattr(event.message, "thread_id", None)
     chat_id = event.chat_id
+    links = session['links'][session['start_index']:session['end_index']]
 
     for idx, item in enumerate(links, start=session['start_index'] + 1):
         if session['stop']:
@@ -184,8 +183,7 @@ async def download_links(event, session, key):
                     f.write(r.content)
                 await client.send_file(chat_id, out_path, caption=title, thread_id=thread_id)
                 os.remove(out_path)
-            else:  # .mpd video
-                # Try resolutions automatically: 1080 → 720 → 480
+            else:  # video
                 success = False
                 for res in ["1080", "720", "480"]:
                     try:
@@ -214,7 +212,6 @@ async def download_links(event, session, key):
             break
     if not session['stop']:
         await event.reply("✅ All downloads completed!", thread_id=thread_id)
-    # Clean session
     user_sessions.pop(key, None)
 
 # ================= RUN BOT =================

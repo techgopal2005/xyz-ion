@@ -16,7 +16,6 @@ SESSION_NAME = "bot_session"
 client = TelegramClient(SESSION_NAME, api_id, api_hash)
 
 # ================= GLOBALS =================
-user_links = {}
 stop_flags = {}
 
 # ================= HELPERS =================
@@ -48,12 +47,12 @@ def parse_txt(file_path):
                 links.append((title, url))
                 if url.endswith(".pdf"):
                     total_pdf += 1
-                elif url.endswith(".mpd") or url.endswith(".m3u8"):
+                else:
                     total_video += 1
     return links, total_video, total_pdf
 
-# ================= DOWNLOAD =================
-async def download_video(url, quality):
+# ================= DOWNLOAD VIDEO =================
+async def download_video(url, quality="1080"):
     qualities = {"1080": "best[height<=1080]", "720": "best[height<=720]", "480": "best[height<=480]"}
     q_list = [quality] + [q for q in ["1080", "720", "480"] if q != quality]
 
@@ -63,20 +62,17 @@ async def download_video(url, quality):
         try:
             ydl_opts = {
                 "format": qualities[q],
-                "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s.%(ext)s"),
+                "outtmpl": os.path.join(DOWNLOAD_PATH, "%(title)s_%(id)s.%(ext)s"),
                 "merge_output_format": "mp4",
                 "prefer_ffmpeg": True,
                 "noplaylist": True,
                 "quiet": False,
                 "retries": 10,
                 "fragment_retries": 10,
-                "concurrent_fragment_downloads": 15,
+                "concurrent_fragment_downloads": 10,
                 "nocheckcertificate": True,
-                "allow_unplayable_formats": True,
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
-                }
+                "overwrites": True,
+                "http_headers": {"User-Agent": "Mozilla/5.0"}
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -96,7 +92,7 @@ async def download_video(url, quality):
 # ================= BOT HANDLERS =================
 @client.on(events.NewMessage(pattern=r"^/start$"))
 async def start_handler(event):
-    await event.respond("🚀 Bot is running!")
+    await event.respond("🚀 Bot is running! Send /txt to upload your TXT file with links.")
 
 @client.on(events.NewMessage(pattern=r"^/stop$"))
 async def stop_handler(event):
@@ -106,54 +102,43 @@ async def stop_handler(event):
 @client.on(events.NewMessage(pattern=r"^/txt$"))
 async def txt_handler(event):
     sender = event.sender_id
-    if sender in user_links:
-        return
-    user_links[sender] = None
     stop_flags[sender] = False
     await event.respond(
-        "➠ Send your TXT file in format:\n\n"
+        "➠ Send your TXT file in the following format:\n\n"
         "FILE NAME : URL\n"
+        "All PDFs and videos in the TXT will be uploaded automatically."
     )
 
 @client.on(events.NewMessage)
 async def file_handler(event):
     sender = event.sender_id
-    if sender not in user_links or stop_flags.get(sender):
+    if stop_flags.get(sender):
         return
 
-    # TXT file processing
     if event.message.file and event.message.file.name.endswith(".txt"):
         path = await event.message.download_media(DOWNLOAD_PATH)
         links, total_video, total_pdf = parse_txt(path)
-        user_links[sender] = links
+        thumbnail = download_thumbnail()
 
         if not links:
             await event.respond("❌ No valid links found in TXT.")
             return
 
         await event.respond(
-            f"Total links found: {len(links)}\n"
-            f"┃\n"
-            f"┠ Total Video Count: {total_video}\n"
-            f"┠ Total PDF Count: {total_pdf}\n"
-            f"┖ Send starting number to begin download (example: 1)"
+            f"📄 Total Links: {len(links)}\n"
+            f"🎬 Videos: {total_video}\n"
+            f"📕 PDFs: {total_pdf}\n"
+            f"🚀 Starting automatic upload..."
         )
-        return
 
-    # Starting number input
-    if user_links[sender] and event.text.isdigit():
-        start_idx = int(event.text) - 1
-        links = user_links[sender]
-        thumbnail = download_thumbnail()
-
-        for idx, (title, url) in enumerate(links[start_idx:], start=start_idx):
+        for idx, (title, url) in enumerate(links, start=1):
             if stop_flags.get(sender):
                 await event.respond("🛑 Process stopped!")
                 break
             try:
                 status_msg = await event.respond(f"⬇ Downloading {title}...")
 
-                # ======= PDF =======
+                # PDF
                 if url.endswith(".pdf"):
                     file_path = os.path.join(DOWNLOAD_PATH, f"{title}.pdf")
                     r = requests.get(url)
@@ -169,10 +154,8 @@ async def file_handler(event):
                     os.remove(file_path)
                     continue
 
-                # ======= VIDEO =======
-                file_path, duration, width, height = await download_video(url, "1080")
-                formatted_duration = format_duration(duration)
-
+                # Video
+                file_path, duration, width, height = await download_video(url)
                 async def progress(current, total):
                     percent = int(current * 100 / total)
                     await status_msg.edit(f"📤 Uploading {title}... {percent}%")
@@ -198,11 +181,10 @@ async def file_handler(event):
                 os.remove(file_path)
 
             except Exception as e:
-                await event.respond(f"❌ Failed at index {idx+1}: {title}\n{e}")
-                continue  # Skip broken links and continue
+                await event.respond(f"❌ Failed at index {idx}: {title}\n{e}")
+                continue
 
-        user_links.pop(sender, None)
-        stop_flags.pop(sender, None)
+        await event.respond("🎉 All files processed!")
 
 # ================= MAIN =================
 async def main():

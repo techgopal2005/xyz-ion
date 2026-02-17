@@ -49,7 +49,7 @@ async def download_video(url, title, index_no, status_msg):
         if d['status'] == 'downloading':
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate') or 1
             pct = int(d.get('downloaded_bytes', 0) * 100 / total_bytes)
-            if pct - last_edit >= 5:  # edit every 5%
+            if pct - last_edit >= 5:
                 asyncio.get_event_loop().create_task(
                     status_msg.edit(f"⬇ [{index_no}] Downloading {title}... {pct}%")
                 )
@@ -66,12 +66,31 @@ async def download_video(url, title, index_no, status_msg):
         "noplaylist": True,
         "retries": 10,
         "fragment_retries": 10,
-        "concurrent_fragment_downloads": 45,  # 🔥 increased
+        "concurrent_fragment_downloads": 45,
         "overwrites": True,
         "quiet": True,
         "progress_hooks": [progress_hook],
         "http_headers": {"User-Agent": "Mozilla/5.0"},
     }
+
+    # Prefer 720p, fallback to best available
+    for fmt in [
+        "bestvideo[height<=720]+bestaudio/best[height<=720]",
+        "bestvideo[height<=480]+bestaudio/best[height<=480]",
+        "bestvideo+bestaudio/best"  # 🔹 fallback to any available
+    ]:
+        try:
+            opts = base_opts.copy()
+            opts["format"] = fmt
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            return file_path, info
+        except Exception:
+            continue
+
+    # if all fails
+    print(f"❌ FAILED INDEX: {index_no} | TITLE: {title}")
+    raise Exception(f"Failed to download\nIndex: {index_no}\nTitle: {title}")
 
     # TRY 720P THEN 480P
     for fmt in [
